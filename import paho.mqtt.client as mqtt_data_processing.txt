@@ -1,0 +1,115 @@
+import paho.mqtt.client as mqtt
+import ssl
+import json
+from pymongo import MongoClient
+import time
+
+# AWS IoT Core configuration
+AWS_IOT_ENDPOINT = "a3njwt7qc4ybpl-ats.iot.ap-south-1.amazonaws.com"
+AWS_IOT_PORT = 8883
+MQTT_TOPIC = "esp32/pub" # esp32/pub
+
+# Certificate paths
+
+ROOT_CA_PATH = "AmazonRootCA1(1).pem"
+CERTIFICATE_PATH = "ee8d5ee1fc7e18865454732b40216ac2209f07062173b08c7a8476e868bb097c-certificate.pem.crt"
+PRIVATE_KEY_PATH = "ee8d5ee1fc7e18865454732b40216ac2209f07062173b08c7a8476e868bb097c-private.pem.key"
+
+# MongoDB Atlas connection
+client = MongoClient("mongodb+srv://Vishwas:Vishwasgowda@django.zyn54ai.mongodb.net/?retryWrites=true&w=majority")
+db = client['MINERS']
+collection = db['rawdata']
+
+
+
+# Message buffer to store two consecutive messages
+message_buffer = []
+
+# Zone classification logic
+def classify_zone(data):
+    try:
+        sensor = data.get("sensor", {})
+        max30100_raw = data.get("MAX30100", "{}")
+        print("Sensor : ",sensor)
+        print("max30100_raw: ",max30100_raw)
+
+        if "heartRate" in max30100_raw and "spO2" in max30100_raw:
+            # max30100 = json.loads(.strip()) if isinstance(max30100_raw, str) else max30100_raw
+            max30100 = max30100_raw
+        else:
+            max30100 = {"heartRate": 0, "spO2": 0}
+
+        print("Sensor : ",sensor)
+        print("max30100_raw: ",max30100_raw)
+        print( "h",sensor.get("humidity", 0) < 100)
+        print("t",sensor.get("temperature", 0) < 100)
+        print("f",sensor.get("FireSensotValue", 1) )
+        print("g",sensor.get("GasSensorValue", 1) )
+        if (
+            sensor.get("humidity", 0) < 100 and
+            sensor.get("temperature", 0) < 100 and
+            sensor.get("FireSensotValue", 1) == 1 and
+            sensor.get("GasSensorValue", 1) == 1 
+        ):
+            print("Safe")
+            return "Safe"
+        else:
+            print("Danger")
+            return "Danger"
+    except Exception as e:
+        print(e)
+        return "UNknown"
+# MQTT callback when connected
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Connected to AWS IoT")
+        client.subscribe(MQTT_TOPIC)
+    else:
+        print("Connection failed with code", rc)
+
+# MQTT callback when message received
+def on_message(client, userdata, msg):
+    global message_buffer
+
+    # Decode and parse JSON
+    raw_data = msg.payload.decode().replace("'", '"')
+    json_object = json.loads(raw_data)
+    json_object['Timestamp'] = time.time()
+
+    # Add Zone classification
+    json_object['Zone'] = classify_zone(json_object)
+
+    print("hi",json_object)
+    # Store message
+    message_buffer.append(json_object)
+    print("hellow",message_buffer)
+    # Once 2 messages received, insert combined into DB
+    if len(message_buffer) == 2:
+        print("message_buffer[1] : ",message_buffer[1])
+        print("message_buffer[0] : ",message_buffer[0])
+        combined_data = {
+            "Message1": message_buffer[1],
+            "Message2": message_buffer[0]
+        }
+
+        print(combined_data)
+
+        collection.insert_one(combined_data)
+        print(combined_data)
+
+        # Clear buffer
+        message_buffer = []
+
+# MQTT client setup
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+client.tls_set(ROOT_CA_PATH,
+               certfile=CERTIFICATE_PATH,
+               keyfile=PRIVATE_KEY_PATH,
+               tls_version=ssl.PROTOCOL_TLSv1_2)
+
+client.tls_insecure_set(False)
+client.connect(AWS_IOT_ENDPOINT, AWS_IOT_PORT, keepalive=60)
+client.loop_forever()
